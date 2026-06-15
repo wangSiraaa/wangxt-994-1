@@ -3,12 +3,19 @@ import type {
   Patient, FollowupPlan, Feedback, AllergyRecord, Prescription,
   PlanGroup, BusinessTrail, OverdueRecord, RestockAlert, RevisitSuggestion,
   UserRole, RiskLevel, TrailType, SupervisionStatus, PatientStatus, PlanStatus, PrescriptionStatus,
+  TriageReason, MedicationChange, FamilySubmission, DrugSubstitution,
+  StopMedicationConfirm, IndicatorRecord, ReminderExemption, TriageReasonType,
+  ReminderExemptionType, StopConfirmStatus,
 } from '@/types'
 import {
   patients as mockPatients, followupPlans as mockPlans, planGroups as mockGroups,
   prescriptions as mockPrescriptions, allergies as mockAllergies, feedbacks as mockFeedbacks,
   overdueRecords as mockOverdueRecords, businessTrails as mockTrails,
   restockAlerts as mockRestockAlerts, revisitSuggestions as mockRevisitSuggestions,
+  triageReasons as mockTriageReasons, medicationChanges as mockMedicationChanges,
+  familySubmissions as mockFamilySubmissions, drugSubstitutions as mockDrugSubstitutions,
+  stopMedicationConfirms as mockStopMedicationConfirms, indicatorRecords as mockIndicatorRecords,
+  reminderExemptions as mockReminderExemptions,
 } from '@/lib/mockData'
 
 interface StoreState {
@@ -22,6 +29,13 @@ interface StoreState {
   trails: BusinessTrail[]
   restockAlerts: RestockAlert[]
   revisitSuggestions: RevisitSuggestion[]
+  triageReasons: TriageReason[]
+  medicationChanges: MedicationChange[]
+  familySubmissions: FamilySubmission[]
+  drugSubstitutions: DrugSubstitution[]
+  stopMedicationConfirms: StopMedicationConfirm[]
+  indicatorRecords: IndicatorRecord[]
+  reminderExemptions: ReminderExemption[]
   currentRole: UserRole
   selectedPatientId: string | null
   sidebarCollapsed: boolean
@@ -36,18 +50,30 @@ interface StoreActions {
   setCurrentRole: (role: UserRole) => void
   addTrail: (type: TrailType, patientId: string, description: string) => void
   createPlan: (patientId: string, groupId: string, cycleDays: number, prescriptionExpiryDate: string) => string
-  submitFeedback: (patientId: string, planId: string, efficacyRating: number, adverseReaction: string, compliance: Feedback['compliance'], note: string) => void
+  submitFeedback: (patientId: string, planId: string, efficacyRating: number, adverseReaction: string, compliance: Feedback['compliance'], note: string, submittedByName?: string, submittedByRole?: UserRole) => void
   markMissedFeedback: (patientId: string) => void
   stopMedication: (patientId: string, reason: string) => void
   archivePatient: (patientId: string) => void
+  restoreArchivedPatient: (patientId: string) => boolean
   addAllergy: (patientId: string, drugName: string, severity: AllergyRecord['severity'], note: string) => void
   togglePrivacy: (patientId: string) => void
   superviseOverdue: (recordId: string, status: SupervisionStatus, supervisor: string) => void
   batchRemind: (groupIds: string[]) => void
+  smartBatchRemind: (groupIds: string[]) => { reminded: number; exempted: number; reasons: string[] }
   checkPrescriptionExpiry: () => void
   updateRestockAlert: (id: string, status: RestockAlert['status']) => void
   updateRevisitSuggestion: (id: string, status: RevisitSuggestion['status']) => void
   addRevisitSuggestion: (patientId: string, prescriptionId: string, reason: string, suggestion: string) => void
+  reTriagePatient: (patientId: string, newRiskLevel: RiskLevel, reason: TriageReasonType, detail: string) => void
+  resolveTriageReason: (triageId: string, resolvedBy: string) => void
+  addTriageReason: (patientId: string, type: TriageReasonType, title: string, detail: string, severity: 'high' | 'medium' | 'low') => void
+  addMedicationChange: (patientId: string, oldDrug: string, newDrug: string, reason: string, changedBy: string) => void
+  approveStopConfirm: (stopId: string, approver: string, note: string) => void
+  rejectStopConfirm: (stopId: string, approver: string, note: string) => void
+  requestStopMedication: (patientId: string, requestedBy: string, reason: string) => void
+  updateDrugSubstitution: (id: string, status: 'accepted' | 'rejected') => void
+  addReminderExemption: (patientId: string, type: ReminderExemptionType, reason: string, exemptDays: number, createdBy: string) => void
+  isPatientExempted: (patientId: string) => { exempted: boolean; exemption?: ReminderExemption }
   selectPatient: (id: string) => void
   deselectPatient: () => void
   toggleSidebar: () => void
@@ -65,12 +91,25 @@ const roleLabel: Record<UserRole, string> = {
   pharmacist: '药师',
   patient: '患者',
   manager: '管理员',
+  family: '家属',
+}
+
+const riskLabels: Record<RiskLevel, string> = {
+  normal: '普通跟进',
+  attention: '重点关注',
+  critical: '风险预警',
 }
 
 const riskUpgradeMap: Record<RiskLevel, RiskLevel | null> = {
   normal: 'attention',
   attention: 'critical',
   critical: null,
+}
+
+const addDays = (date: Date, days: number): string => {
+  const d = new Date(date)
+  d.setDate(d.getDate() + days)
+  return d.toISOString().slice(0, 10)
 }
 
 export const useStore = create<StoreState & StoreActions>()((set, get) => ({
@@ -84,6 +123,13 @@ export const useStore = create<StoreState & StoreActions>()((set, get) => ({
   trails: mockTrails,
   restockAlerts: mockRestockAlerts,
   revisitSuggestions: mockRevisitSuggestions,
+  triageReasons: mockTriageReasons,
+  medicationChanges: mockMedicationChanges,
+  familySubmissions: mockFamilySubmissions,
+  drugSubstitutions: mockDrugSubstitutions,
+  stopMedicationConfirms: mockStopMedicationConfirms,
+  indicatorRecords: mockIndicatorRecords,
+  reminderExemptions: mockReminderExemptions,
   currentRole: 'pharmacist',
   selectedPatientId: null,
   sidebarCollapsed: false,
@@ -206,8 +252,9 @@ export const useStore = create<StoreState & StoreActions>()((set, get) => ({
     return planId
   },
 
-  submitFeedback: (patientId, planId, efficacyRating, adverseReaction, compliance, note) => {
+  submitFeedback: (patientId, planId, efficacyRating, adverseReaction, compliance, note, submittedByName, submittedByRole) => {
     const state = get()
+    const actRole = submittedByRole || state.currentRole
     const fb: Feedback = {
       id: `fb-${Date.now()}`,
       patientId,
@@ -215,7 +262,8 @@ export const useStore = create<StoreState & StoreActions>()((set, get) => ({
       efficacyRating,
       adverseReaction,
       compliance,
-      submittedBy: state.currentRole,
+      submittedBy: actRole,
+      submittedByName,
       note,
       submittedAt: now(),
     }
@@ -233,6 +281,8 @@ export const useStore = create<StoreState & StoreActions>()((set, get) => ({
     const newOverdue = state.overdueRecords.filter((r) => r.patientId !== patientId || r.planId !== planId)
     const prescription = state.prescriptions.find((pr) => pr.patientId === patientId && pr.status === 'valid')
     let newSuggestions = state.revisitSuggestions
+    let newFamilySubmissions = state.familySubmissions
+    let newTriageReasons = state.triageReasons
     if (!prescription) {
       const patientRx = state.prescriptions.find((pr) => pr.patientId === patientId)
       if (patientRx) {
@@ -249,8 +299,50 @@ export const useStore = create<StoreState & StoreActions>()((set, get) => ({
         get().addTrail('revisit_suggested', patientId, '处方过期，自动生成复诊建议')
       }
     }
-    set({ feedbacks: newFeedbacks, plans: newPlans, patients: newPatients, overdueRecords: newOverdue, revisitSuggestions: newSuggestions })
-    get().addTrail('feedback_changed', patientId, `提交随访反馈，疗效评分${efficacyRating}分，依从性：${compliance === 'good' ? '良好' : compliance === 'moderate' ? '一般' : '较差'}`)
+    if (actRole === 'family' && submittedByName) {
+      const fs: FamilySubmission = {
+        id: `fs-${Date.now()}`,
+        patientId,
+        feedbackId: fb.id,
+        familyName: submittedByName,
+        relation: '家属',
+        phone: state.patients.find((p) => p.id === patientId)?.familyContact?.phone || '',
+        submittedAt: now(),
+        note: '家属代填反馈记录',
+      }
+      newFamilySubmissions = [...state.familySubmissions, fs]
+      const triage: TriageReason = {
+        id: `tr-${Date.now()}-fs`,
+        patientId,
+        type: 'family_submission',
+        title: '家属代填反馈，信息需核实',
+        detail: `最近一次反馈由家属${submittedByName}代填，建议电话沟通确认患者真实情况`,
+        severity: 'low',
+        triggeredAt: now(),
+      }
+      newTriageReasons = [...state.triageReasons, triage]
+      get().addTrail('family_submitted', patientId, `家属${submittedByName}代填反馈，已触发重新分层评估`)
+    }
+    if (compliance === 'poor' || adverseReaction && adverseReaction !== '无' && adverseReaction !== '') {
+      const existingTriage = state.triageReasons.find(
+        (t) => t.patientId === patientId && !t.resolved && (t.type === 'compliance_poor' || t.type === 'adverse_reaction')
+      )
+      if (!existingTriage) {
+        const triage: TriageReason = {
+          id: `tr-${Date.now()}-ac`,
+          patientId,
+          type: compliance === 'poor' ? 'compliance_poor' : 'adverse_reaction',
+          title: compliance === 'poor' ? '依从性较差，建议加强随访' : `出现不良反应：${adverseReaction}`,
+          detail: compliance === 'poor' ? '近期反馈依从性持续较差，需加强用药指导和提醒频率' : `反馈报告不良反应：${adverseReaction}，建议评估是否调整用药方案`,
+          severity: compliance === 'poor' ? 'high' : 'medium',
+          triggeredAt: now(),
+        }
+        newTriageReasons = [...newTriageReasons, triage]
+        get().addTrail('triage_changed', patientId, compliance === 'poor' ? '依从性差触发重新分层评估' : '出现不良反应触发重新分层评估')
+      }
+    }
+    set({ feedbacks: newFeedbacks, plans: newPlans, patients: newPatients, overdueRecords: newOverdue, revisitSuggestions: newSuggestions, familySubmissions: newFamilySubmissions, triageReasons: newTriageReasons })
+    get().addTrail('feedback_changed', patientId, `${submittedByName ? submittedByName + '（家属）' : roleLabel[actRole]}提交随访反馈，疗效评分${efficacyRating}分，依从性：${compliance === 'good' ? '良好' : compliance === 'moderate' ? '一般' : '较差'}`)
   },
 
   markMissedFeedback: (patientId) => {
@@ -281,6 +373,12 @@ export const useStore = create<StoreState & StoreActions>()((set, get) => ({
 
   stopMedication: (patientId, reason) => {
     const state = get()
+    const patient = state.patients.find((p) => p.id === patientId)
+    if (!patient) return
+    if (patient.status === 'archived') {
+      get().addTrail('medication_stopped', patientId, '操作拒绝：已归档患者不可执行停药，请先确认归档状态')
+      return
+    }
     const newPatients = state.patients.map((p) =>
       p.id === patientId ? { ...p, status: 'stopped' as PatientStatus, stoppedAt: today() } : p
     )
@@ -293,11 +391,41 @@ export const useStore = create<StoreState & StoreActions>()((set, get) => ({
 
   archivePatient: (patientId) => {
     const state = get()
+    const patient = state.patients.find((p) => p.id === patientId)
+    if (!patient) return
+    if (patient.status !== 'stopped') {
+      get().addTrail('medication_stopped', patientId, '归档拒绝：仅已停药患者可归档，请先执行停药操作')
+      return
+    }
     const newPatients = state.patients.map((p) =>
       p.id === patientId ? { ...p, status: 'archived' as PatientStatus, archivedAt: today() } : p
     )
+    const newPlans = state.plans.map((p) =>
+      p.patientId === patientId ? { ...p, status: 'expired' as PlanStatus, updatedAt: today() } : p
+    )
+    set({ patients: newPatients, plans: newPlans })
+    get().addTrail('medication_stopped', patientId, '患者已归档，历史提醒已锁定不可误恢复')
+  },
+
+  restoreArchivedPatient: (patientId) => {
+    const state = get()
+    const patient = state.patients.find((p) => p.id === patientId)
+    if (!patient || patient.status !== 'archived') return false
+    if (patient.archivedAt) {
+      const archivedDays = Math.ceil((Date.now() - new Date(patient.archivedAt).getTime()) / (1000 * 60 * 60 * 24))
+      if (archivedDays > 30) {
+        get().addTrail('medication_stopped', patientId, `恢复归档拒绝：归档已超过${archivedDays}天，历史提醒已锁定不可恢复，需重新建档`)
+        return false
+      }
+    }
+    const confirm = window.confirm(`即将恢复患者「${patient.name}」，归档超过30天不可恢复。\n确定要恢复吗？恢复后需手动重建随访计划。`)
+    if (!confirm) return false
+    const newPatients = state.patients.map((p) =>
+      p.id === patientId ? { ...p, status: 'stopped' as PatientStatus } : p
+    )
     set({ patients: newPatients })
-    get().addTrail('medication_stopped', patientId, '患者已归档')
+    get().addTrail('medication_stopped', patientId, '归档患者恢复为停药状态，需手动评估后创建新随访计划')
+    return true
   },
 
   addAllergy: (patientId, drugName, severity, note) => {
@@ -428,6 +556,231 @@ export const useStore = create<StoreState & StoreActions>()((set, get) => ({
     }
     set({ revisitSuggestions: [...state.revisitSuggestions, rs] })
     get().addTrail('revisit_suggested', patientId, `人工发起复诊建议：${reason}`)
+  },
+
+  batchRemind: (groupIds) => {
+    const result = get().smartBatchRemind(groupIds)
+    if (result.exempted > 0) {
+      alert(`批量提醒完成：已提醒${result.reminded}位，豁免${result.exempted}位\n豁免原因：${result.reasons.join('；')}`)
+    }
+  },
+
+  smartBatchRemind: (groupIds) => {
+    const state = get()
+    const targetGroupIds = new Set(groupIds)
+    const targetPlans = state.plans.filter((p) => targetGroupIds.has(p.groupId) && p.status === 'active')
+    let reminded = 0
+    let exempted = 0
+    const reasons: string[] = []
+    for (const plan of targetPlans) {
+      const patient = state.patients.find((p) => p.id === plan.patientId)
+      if (!patient || patient.status !== 'active') continue
+      const exemptInfo = state.isPatientExempted(patient.id)
+      if (exemptInfo.exempted && exemptInfo.exemption) {
+        exempted++
+        if (!reasons.includes(exemptInfo.exemption.reason)) {
+          reasons.push(exemptInfo.exemption.reason)
+        }
+        get().addTrail('reminder_exempted', patient.id, `批量提醒豁免：${exemptInfo.exemption.reason}`)
+        continue
+      }
+      if (!patient.privacyAuthorized) {
+        exempted++
+        const reason = `${patient.name}未授权隐私协议`
+        if (!reasons.includes(reason)) reasons.push(reason)
+        continue
+      }
+      get().addTrail('batch_reminder', patient.id, '批量随访提醒已发送')
+      reminded++
+    }
+    const groupNames = state.groups.filter((g) => groupIds.includes(g.id)).map((g) => g.name).join('、')
+    get().addTrail('batch_reminder', 'system', `批量提醒（智能豁免模式）已发送到${groupNames}，已提醒${reminded}位，豁免${exempted}位`)
+    return { reminded, exempted, reasons }
+  },
+
+  reTriagePatient: (patientId, newRiskLevel, reason, detail) => {
+    const state = get()
+    const patient = state.patients.find((p) => p.id === patientId)
+    if (!patient) return
+    const oldRisk = patient.riskLevel
+    const newPatients = state.patients.map((p) =>
+      p.id === patientId ? { ...p, riskLevel: newRiskLevel } : p
+    )
+    const triage: TriageReason = {
+      id: `tr-${Date.now()}`,
+      patientId,
+      type: reason,
+      title: `风险分层调整：${riskLabels[oldRisk]} → ${riskLabels[newRiskLevel]}`,
+      detail,
+      severity: newRiskLevel === 'critical' ? 'high' : newRiskLevel === 'attention' ? 'medium' : 'low',
+      triggeredAt: now(),
+    }
+    set({ patients: newPatients, triageReasons: [...state.triageReasons, triage] })
+    get().addTrail('triage_changed', patientId, `药师手动重新分层：风险等级从${riskLabels[oldRisk]}调整为${riskLabels[newRiskLevel]}，原因：${detail}`)
+  },
+
+  resolveTriageReason: (triageId, resolvedBy) => {
+    const state = get()
+    const newReasons = state.triageReasons.map((t) =>
+      t.id === triageId ? { ...t, resolved: true, resolvedAt: now(), resolvedBy } : t
+    )
+    const triage = state.triageReasons.find((t) => t.id === triageId)
+    set({ triageReasons: newReasons })
+    if (triage) {
+      get().addTrail('triage_changed', triage.patientId, `分层原因「${triage.title}」已标记解决，处理人：${resolvedBy}`)
+    }
+  },
+
+  addTriageReason: (patientId, type, title, detail, severity) => {
+    const state = get()
+    const existing = state.triageReasons.find(
+      (t) => t.patientId === patientId && t.type === type && !t.resolved
+    )
+    if (existing) return
+    const triage: TriageReason = {
+      id: `tr-${Date.now()}`,
+      patientId,
+      type,
+      title,
+      detail,
+      severity,
+      triggeredAt: now(),
+    }
+    set({ triageReasons: [...state.triageReasons, triage] })
+    get().addTrail('triage_changed', patientId, `新增分层触发：${title}`)
+  },
+
+  addMedicationChange: (patientId, oldDrug, newDrug, reason, changedBy) => {
+    const state = get()
+    const mc: MedicationChange = {
+      id: `mc-${Date.now()}`,
+      patientId,
+      oldDrug,
+      newDrug,
+      reason,
+      changedBy,
+      changedAt: now(),
+    }
+    const triage: TriageReason = {
+      id: `tr-${Date.now()}-mc`,
+      patientId,
+      type: 'medication_change',
+      title: `近期换药：${oldDrug} → ${newDrug}`,
+      detail: `更换原因：${reason}，需密切观察患者用药后反应及指标变化`,
+      severity: 'medium',
+      triggeredAt: now(),
+    }
+    set({
+      medicationChanges: [...state.medicationChanges, mc],
+      triageReasons: [...state.triageReasons, triage],
+    })
+    get().addTrail('medication_changed', patientId, `药师调整用药：${oldDrug}更换为${newDrug}，原因：${reason}`)
+  },
+
+  approveStopConfirm: (stopId, approver, note) => {
+    const state = get()
+    const stopRecord = state.stopMedicationConfirms.find((s) => s.id === stopId)
+    if (!stopRecord) return
+    const newConfirms = state.stopMedicationConfirms.map((s) =>
+      s.id === stopId ? { ...s, status: 'approved' as StopConfirmStatus, approver, approvedAt: now(), approvedNote: note } : s
+    )
+    set({ stopMedicationConfirms: newConfirms })
+    get().stopMedication(stopRecord.patientId, `${stopRecord.requestReason}；店长批准意见：${note}`)
+    get().addTrail('stop_confirmed', stopRecord.patientId, `停药申请已批准，批准人：${approver}，意见：${note}`)
+  },
+
+  rejectStopConfirm: (stopId, approver, note) => {
+    const state = get()
+    const stopRecord = state.stopMedicationConfirms.find((s) => s.id === stopId)
+    if (!stopRecord) return
+    const newConfirms = state.stopMedicationConfirms.map((s) =>
+      s.id === stopId ? { ...s, status: 'rejected' as StopConfirmStatus, approver, approvedAt: now(), approvedNote: note } : s
+    )
+    set({ stopMedicationConfirms: newConfirms })
+    get().addTrail('stop_confirmed', stopRecord.patientId, `停药申请已驳回，驳回人：${approver}，原因：${note}`)
+  },
+
+  requestStopMedication: (patientId, requestedBy, reason) => {
+    const state = get()
+    const sc: StopMedicationConfirm = {
+      id: `sc-${Date.now()}`,
+      patientId,
+      requestedBy,
+      requestReason: reason,
+      status: 'pending',
+      createdAt: now(),
+    }
+    const exemption: ReminderExemption = {
+      id: `re-${Date.now()}-stop`,
+      patientId,
+      type: 'stop_pending',
+      reason: `停药申请待店长确认中（申请人：${requestedBy}），暂停催办`,
+      exemptedUntil: addDays(new Date(), 7),
+      createdBy: '系统',
+      createdAt: now(),
+    }
+    set({
+      stopMedicationConfirms: [...state.stopMedicationConfirms, sc],
+      reminderExemptions: [...state.reminderExemptions, exemption],
+    })
+    get().addTrail('stop_confirmed', patientId, `提交停药申请：${reason}，待店长确认`)
+  },
+
+  updateDrugSubstitution: (id, status) => {
+    const state = get()
+    const ds = state.drugSubstitutions.find((d) => d.id === id)
+    if (!ds) return
+    const newSubs = state.drugSubstitutions.map((d) =>
+      d.id === id ? { ...d, status } : d
+    )
+    set({ drugSubstitutions: newSubs })
+    get().addTrail('drug_substituted', ds.patientId,
+      status === 'accepted'
+        ? `药品替代已接受：${ds.originalDrug} → ${ds.substituteDrug}`
+        : `药品替代已拒绝：保持原方案${ds.originalDrug}`
+    )
+  },
+
+  addReminderExemption: (patientId, type, reason, exemptDays, createdBy) => {
+    const state = get()
+    const re: ReminderExemption = {
+      id: `re-${Date.now()}`,
+      patientId,
+      type,
+      reason,
+      exemptedUntil: addDays(new Date(), exemptDays),
+      createdBy,
+      createdAt: now(),
+    }
+    set({ reminderExemptions: [...state.reminderExemptions, re] })
+    get().addTrail('reminder_exempted', patientId, `添加催办豁免，类型：${type}，原因：${reason}，豁免${exemptDays}天`)
+  },
+
+  isPatientExempted: (patientId) => {
+    const state = get()
+    const todayStr = today()
+    const exemption = state.reminderExemptions.find(
+      (r) => r.patientId === patientId && r.exemptedUntil >= todayStr
+    )
+    if (exemption) {
+      return { exempted: true, exemption }
+    }
+    const revisit = state.revisitSuggestions.find(
+      (r) => r.patientId === patientId && r.status !== 'confirmed' && r.revisitAppointedAt && r.revisitAppointedAt >= todayStr
+    )
+    if (revisit && revisit.revisitAppointedAt) {
+      const autoExemption: ReminderExemption = {
+        id: `auto-${patientId}-revisit`,
+        patientId,
+        type: 'revisit_appointed',
+        reason: `患者已预约${revisit.revisitAppointedAt}复诊续方，催办自动豁免至复诊后`,
+        exemptedUntil: addDays(new Date(revisit.revisitAppointedAt), 2),
+        createdBy: '系统自动',
+        createdAt: now(),
+      }
+      return { exempted: true, exemption: autoExemption }
+    }
+    return { exempted: false }
   },
 
   selectPatient: (id) => set({ selectedPatientId: id }),
