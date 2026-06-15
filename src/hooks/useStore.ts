@@ -35,7 +35,7 @@ interface StoreState {
 interface StoreActions {
   setCurrentRole: (role: UserRole) => void
   addTrail: (type: TrailType, patientId: string, description: string) => void
-  createPlan: (patientId: string, groupId: string, cycleDays: number, prescriptionExpiryDate: string) => string | null
+  createPlan: (patientId: string, groupId: string, cycleDays: number, prescriptionExpiryDate: string) => string
   submitFeedback: (patientId: string, planId: string, efficacyRating: number, adverseReaction: string, compliance: Feedback['compliance'], note: string) => void
   markMissedFeedback: (patientId: string) => void
   stopMedication: (patientId: string, reason: string) => void
@@ -115,14 +115,68 @@ export const useStore = create<StoreState & StoreActions>()((set, get) => ({
   createPlan: (patientId, groupId, cycleDays, prescriptionExpiryDate) => {
     const state = get()
     const patient = state.patients.find((p) => p.id === patientId)
-    if (patient == null) return null
+    if (patient == null) return 'error:no_patient'
     if (patient.status !== 'active') {
       get().addTrail('prescription_expired', patientId, '创建随访计划失败：患者状态非活跃')
-      return null
+      return 'error:patient_inactive'
     }
     if (!patient.privacyAuthorized) {
       get().addTrail('privacy_changed', patientId, '创建随访计划失败：患者未授权隐私协议')
-      return null
+      return 'error:no_privacy'
+    }
+    const todayStr = today()
+    if (prescriptionExpiryDate < todayStr) {
+      const patientRxs = state.prescriptions.filter((p) => p.patientId === patientId)
+      const validRx = patientRxs.find((p) => p.status === 'valid')
+      const targetRx = validRx || patientRxs[0]
+      let newSuggestions = state.revisitSuggestions
+      if (targetRx) {
+        const existingSuggestion = state.revisitSuggestions.find(
+          (s) => s.prescriptionId === targetRx.id && s.status === 'pending'
+        )
+        if (!existingSuggestion) {
+          const suggestion: RevisitSuggestion = {
+            id: `rs-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            patientId,
+            prescriptionId: targetRx.id,
+            reason: `创建随访计划时拦截：处方到期日「${prescriptionExpiryDate}」已过期，不可创建进行中随访计划`,
+            suggestion: '请先联系患者复诊续方，获得新处方后再创建随访计划',
+            status: 'pending',
+            createdAt: now(),
+          }
+          newSuggestions = [...state.revisitSuggestions, suggestion]
+        }
+      } else {
+        const existingSuggestion = state.revisitSuggestions.find(
+          (s) => s.patientId === patientId && s.status === 'pending'
+        )
+        if (!existingSuggestion) {
+          const suggestion: RevisitSuggestion = {
+            id: `rs-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            patientId,
+            prescriptionId: '',
+            reason: `创建随访计划时拦截：处方到期日「${prescriptionExpiryDate}」已过期，不可创建进行中随访计划`,
+            suggestion: '请先联系患者复诊续方，获得新处方后再创建随访计划',
+            status: 'pending',
+            createdAt: now(),
+          }
+          newSuggestions = [...state.revisitSuggestions, suggestion]
+        }
+      }
+      if (targetRx && targetRx.status === 'valid') {
+        const updatedRxs = state.prescriptions.map((p) =>
+          p.id === targetRx.id ? { ...p, status: 'expired' as PrescriptionStatus } : p
+        )
+        set({ prescriptions: updatedRxs, revisitSuggestions: newSuggestions })
+      } else {
+        set({ revisitSuggestions: newSuggestions })
+      }
+      get().addTrail(
+        'prescription_expired',
+        patientId,
+        `创建随访计划处方过期拦截：处方到期日「${prescriptionExpiryDate}」已过期，无法创建进行中随访计划，已生成复诊建议并通知店长关注`
+      )
+      return 'error:prescription_expired'
     }
     const patientAllergies = state.allergies.filter((a) => a.patientId === patientId)
     const patientPrescriptions = state.prescriptions.filter((p) => p.patientId === patientId && p.status === 'valid')
@@ -130,7 +184,7 @@ export const useStore = create<StoreState & StoreActions>()((set, get) => ({
       const hasConflict = patientAllergies.some((a) => rx.drugName.includes(a.drugName) || a.drugName.includes(rx.drugName))
       if (hasConflict) {
         get().addTrail('allergy_added', patientId, `创建随访计划失败：处方药品「${rx.drugName}」与过敏记录「${patientAllergies.find(a => rx.drugName.includes(a.drugName))?.drugName}」冲突`)
-        return null
+        return 'error:allergy_conflict'
       }
     }
     const planId = `fp-${Date.now()}`

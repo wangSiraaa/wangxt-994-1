@@ -57,6 +57,12 @@ export default function ManagerDashboard() {
   const expiredPrescriptions = prescriptions.filter((p) => p.status === 'expired');
   const pendingRestock = restockAlerts.filter((r) => r.status === 'pending');
   const pendingRevisit = revisitSuggestions.filter((s) => s.status === 'pending');
+
+  const revisitPatientIds = new Set(pendingRevisit.map((s) => s.patientId));
+  const revisitNeededPatients = patients.filter(
+    (p) => revisitPatientIds.has(p.id) && p.status === 'active'
+  );
+  const criticalWithoutRevisit = criticalPatients.filter((p) => !revisitPatientIds.has(p.id));
   const recentTrails = [...trails].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()).slice(0, 10);
 
   const today = new Date().toISOString().slice(0, 10);
@@ -165,26 +171,30 @@ export default function ManagerDashboard() {
           )}
 
           {pendingRevisit.length > 0 && (
-            <div className="bg-amber-50 border border-amber-200 rounded-xl p-4">
+            <div className="bg-red-50 border border-red-300 rounded-xl p-4">
               <div className="flex items-start gap-3">
-                <Calendar className="w-5 h-5 text-amber-600 mt-0.5 flex-shrink-0" />
+                <Calendar className="w-5 h-5 text-red-600 mt-0.5 flex-shrink-0" />
                 <div className="flex-1">
-                  <h3 className="font-semibold text-amber-800">复诊建议待处理</h3>
-                  <p className="text-sm text-amber-700 mt-1">
-                    有 {pendingRevisit.length} 位患者需要复诊提醒
+                  <h3 className="font-semibold text-red-800">需复诊续方（处方过期拦截）</h3>
+                  <p className="text-sm text-red-700 mt-1">
+                    有 {revisitNeededPatients.length} 位患者处方已过期或被拦截，须先复诊续方，不可继续跟进随访
                   </p>
                   <div className="flex flex-wrap gap-2 mt-2">
-                    {pendingRevisit.slice(0, 3).map((suggestion) => {
-                      const patient = patients.find((p) => p.id === suggestion.patientId);
-                      return patient ? (
-                        <Badge key={suggestion.id} variant="warning">
-                          {patient.name}
-                        </Badge>
-                      ) : null;
+                    {revisitNeededPatients.slice(0, 4).map((patient) => {
+                      const suggestion = pendingRevisit.find((s) => s.patientId === patient.id);
+                      return (
+                        <div key={patient.id} className="bg-white border border-red-200 rounded-lg px-3 py-1.5 text-xs">
+                          <span className="font-medium text-red-800">{patient.name}</span>
+                          <span className="text-red-600 ml-1">({patient.chronicDisease})</span>
+                          {suggestion && (
+                            <p className="text-red-500 mt-0.5 max-w-[200px] truncate">{suggestion.reason}</p>
+                          )}
+                        </div>
+                      );
                     })}
                   </div>
-                  <Link to="/pharmacist/revisit" className="text-sm text-amber-600 hover:text-amber-700 mt-2 inline-flex items-center gap-1">
-                    查看详情 <ArrowRight className="w-3 h-3" />
+                  <Link to="/pharmacist/revisit" className="text-sm text-red-600 hover:text-red-700 mt-2 inline-flex items-center gap-1">
+                    管理复诊建议 <ArrowRight className="w-3 h-3" />
                   </Link>
                 </div>
               </div>
@@ -281,46 +291,86 @@ export default function ManagerDashboard() {
             </Link>
           </div>
           <div className="divide-y divide-slate-100 max-h-96 overflow-y-auto">
-            {criticalPatients.length === 0 ? (
+            {revisitNeededPatients.length > 0 && (
+              <div className="bg-red-50/50">
+                <div className="px-4 pt-3 pb-1">
+                  <p className="text-xs font-semibold text-red-700 flex items-center gap-1">
+                    <Calendar className="w-3 h-3" />
+                    需复诊续方（不可继续跟进）
+                  </p>
+                </div>
+                {revisitNeededPatients.map((patient) => {
+                  const suggestion = pendingRevisit.find((s) => s.patientId === patient.id);
+                  return (
+                    <div key={`revisit-${patient.id}`} className="px-4 py-3 hover:bg-red-50">
+                      <div className="flex items-center justify-between mb-1">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium text-red-800">{patient.name}</span>
+                          <Badge variant="danger">需复诊</Badge>
+                        </div>
+                        <span className="text-xs text-red-600">{patient.chronicDisease}</span>
+                      </div>
+                      {suggestion && (
+                        <p className="text-xs text-red-600 mt-1 flex items-center gap-1">
+                          <Pill className="w-3 h-3" />
+                          {suggestion.reason}
+                        </p>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {criticalWithoutRevisit.length === 0 && revisitNeededPatients.length === 0 ? (
               <div className="p-12 text-center text-slate-500">
                 <CheckCircle className="w-12 h-12 mx-auto text-green-400 mb-3" />
                 <p>暂无重点关注患者</p>
               </div>
-            ) : (
-              criticalPatients.slice(0, 6).map((patient) => {
-                const patientOverdue = getOverdueForPatient(patient.id);
-                const patientRx = prescriptions.find((r) => r.patientId === patient.id && r.status === 'valid');
-                return (
-                  <div key={patient.id} className="p-4 hover:bg-slate-50">
-                    <div className="flex items-center justify-between mb-2">
-                      <div className="flex items-center gap-2">
-                        <span className="font-medium text-slate-800">{patient.name}</span>
-                        <Badge variant="danger">重点</Badge>
+            ) : criticalWithoutRevisit.length > 0 ? (
+              <>
+                {revisitNeededPatients.length > 0 && (
+                  <div className="px-4 pt-3 pb-1">
+                    <p className="text-xs font-semibold text-amber-700 flex items-center gap-1">
+                      <AlertTriangle className="w-3 h-3" />
+                      需继续跟进（非处方过期）
+                    </p>
+                  </div>
+                )}
+                {criticalWithoutRevisit.map((patient) => {
+                  const patientOverdue = getOverdueForPatient(patient.id);
+                  const patientRx = prescriptions.find((r) => r.patientId === patient.id && r.status === 'valid');
+                  return (
+                    <div key={patient.id} className="p-4 hover:bg-slate-50">
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium text-slate-800">{patient.name}</span>
+                          <Badge variant="danger">重点</Badge>
+                        </div>
+                        <span className="text-xs text-slate-500">{patient.chronicDisease}</span>
                       </div>
-                      <span className="text-xs text-slate-500">{patient.chronicDisease}</span>
-                    </div>
-                    <div className="flex items-center gap-3 text-xs text-slate-500">
-                      <span className="flex items-center gap-1">
-                        <XCircle className="w-3 h-3" />
-                        连续{patient.consecutiveMissedFeedback}次未反馈
-                      </span>
-                      {patientOverdue.length > 0 && (
-                        <span className="flex items-center gap-1 text-red-500">
-                          <Clock className="w-3 h-3" />
-                          逾期{patientOverdue[0].overdueDays}天
+                      <div className="flex items-center gap-3 text-xs text-slate-500">
+                        <span className="flex items-center gap-1">
+                          <XCircle className="w-3 h-3" />
+                          连续{patient.consecutiveMissedFeedback}次未反馈
                         </span>
+                        {patientOverdue.length > 0 && (
+                          <span className="flex items-center gap-1 text-red-500">
+                            <Clock className="w-3 h-3" />
+                            逾期{patientOverdue[0].overdueDays}天
+                          </span>
+                        )}
+                      </div>
+                      {patientRx && (
+                        <p className="text-xs text-amber-600 mt-2 flex items-center gap-1">
+                          <Pill className="w-3 h-3" />
+                          {patientRx.drugName} 有效期至 {patientRx.expiryDate}
+                        </p>
                       )}
                     </div>
-                    {patientRx && (
-                      <p className="text-xs text-amber-600 mt-2 flex items-center gap-1">
-                        <Pill className="w-3 h-3" />
-                        {patientRx.drugName} 有效期至 {patientRx.expiryDate}
-                      </p>
-                    )}
-                  </div>
-                );
-              })
-            )}
+                  );
+                })}
+              </>
+            ) : null}
           </div>
         </div>
       </div>

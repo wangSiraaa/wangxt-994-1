@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useStore } from '@/hooks/useStore';
 import Badge from '@/components/shared/Badge';
 import Modal from '@/components/shared/Modal';
-import { Plus, Calendar, Pill, User, AlertTriangle, CheckCircle, Pause, Play, Archive } from 'lucide-react';
+import { Plus, Calendar, Pill, User, AlertTriangle, CheckCircle, XCircle, Pause, Play, Archive } from 'lucide-react';
 
 const statusColors = {
   active: 'bg-green-100 text-green-700',
@@ -26,25 +26,56 @@ export default function PharmacistPlans() {
     cycleDays: 14,
     prescriptionExpiryDate: '',
   });
+  const [createError, setCreateError] = useState<string | null>(null);
+
+  const errorMessages: Record<string, { title: string; detail: string }> = {
+    'error:prescription_expired': {
+      title: '处方已过期，无法创建随访计划',
+      detail: '该患者处方到期日早于今日，须先联系患者复诊续方，获得新处方后方可创建进行中随访计划。系统已自动生成复诊建议并记录业务轨迹。',
+    },
+    'error:no_privacy': {
+      title: '患者未授权隐私协议',
+      detail: '请先取得患者隐私授权后再创建随访计划。',
+    },
+    'error:allergy_conflict': {
+      title: '处方药品与过敏记录冲突',
+      detail: '当前处方中包含患者过敏的药品，请先确认处方或更新过敏记录。',
+    },
+    'error:patient_inactive': {
+      title: '患者状态非活跃',
+      detail: '该患者当前状态不允许创建随访计划。',
+    },
+    'error:no_patient': {
+      title: '未找到患者信息',
+      detail: '请确认选择的患者是否存在。',
+    },
+  };
 
   const handleCreatePlan = () => {
     if (!formData.patientId || !formData.groupId || !formData.prescriptionExpiryDate) {
-      alert('请填写完整信息');
+      setCreateError('请填写完整信息');
       return;
     }
+    setCreateError(null);
     const result = createPlan(
       formData.patientId,
       formData.groupId,
       formData.cycleDays,
       formData.prescriptionExpiryDate
     );
-    if (result) {
+    if (result.startsWith('error:')) {
+      setCreateError(result);
+    } else {
       alert('随访计划创建成功！');
       setShowCreatePlanModal(false);
       setFormData({ patientId: '', groupId: '', cycleDays: 14, prescriptionExpiryDate: '' });
-    } else {
-      alert('创建失败，请检查患者隐私授权、过敏禁忌等情况');
     }
+  };
+
+  const handleCloseModal = () => {
+    setShowCreatePlanModal(false);
+    setCreateError(null);
+    setFormData({ patientId: '', groupId: '', cycleDays: 14, prescriptionExpiryDate: '' });
   };
 
   const handleStopMedication = (patientId: string) => {
@@ -209,7 +240,7 @@ export default function PharmacistPlans() {
 
       <Modal
         open={showCreatePlanModal}
-        onClose={() => setShowCreatePlanModal(false)}
+        onClose={handleCloseModal}
         title="新建随访计划"
       >
         <div className="space-y-4">
@@ -289,28 +320,75 @@ export default function PharmacistPlans() {
           </div>
 
           {formData.patientId && (
-            <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
-              <p className="text-sm text-blue-800 font-medium">创建前检查：</p>
-              <ul className="text-xs text-blue-700 mt-1 space-y-1">
-                <li className="flex items-center gap-1">
-                  <CheckCircle className="w-3 h-3" />
-                  患者隐私授权：
-                  {patients.find((p) => p.id === formData.patientId)?.privacyAuthorized ? '已授权' : '未授权'}
-                </li>
-                <li className="flex items-center gap-1">
-                  <CheckCircle className="w-3 h-3" />
-                  过敏记录：
-                  {prescriptions.filter((a) => a.patientId === formData.patientId).length > 0
-                    ? `${prescriptions.filter((a) => a.patientId === formData.patientId).length}条记录，需核对处方`
-                    : '无'}
-                </li>
-              </ul>
+            <div className={`rounded-lg p-3 border ${
+              formData.prescriptionExpiryDate && formData.prescriptionExpiryDate < new Date().toISOString().slice(0, 10)
+                ? 'bg-red-50 border-red-300'
+                : 'bg-blue-50 border-blue-200'
+            }`}>
+              {formData.prescriptionExpiryDate && formData.prescriptionExpiryDate < new Date().toISOString().slice(0, 10) ? (
+                <div>
+                  <p className="text-sm text-red-800 font-medium flex items-center gap-1">
+                    <XCircle className="w-4 h-4" />
+                    处方到期日已过期，无法创建进行中随访计划
+                  </p>
+                  <p className="text-xs text-red-700 mt-1">
+                    处方到期日「{formData.prescriptionExpiryDate}」早于今日，请先联系患者复诊续方
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <p className="text-sm text-blue-800 font-medium">创建前检查：</p>
+                  <ul className="text-xs text-blue-700 mt-1 space-y-1">
+                    <li className="flex items-center gap-1">
+                      <CheckCircle className="w-3 h-3" />
+                      患者隐私授权：
+                      {patients.find((p) => p.id === formData.patientId)?.privacyAuthorized ? '已授权' : '未授权'}
+                    </li>
+                    <li className="flex items-center gap-1">
+                      <CheckCircle className="w-3 h-3" />
+                      过敏记录：
+                      {prescriptions.filter((a) => a.patientId === formData.patientId).length > 0
+                        ? `${prescriptions.filter((a) => a.patientId === formData.patientId).length}条记录，需核对处方`
+                        : '无'}
+                    </li>
+                  </ul>
+                </>
+              )}
+            </div>
+          )}
+
+          {createError && (
+            <div className={`rounded-lg p-4 border ${
+              createError === 'prescription_expired' || createError === 'error:prescription_expired'
+                ? 'bg-red-50 border-red-300'
+                : 'bg-amber-50 border-amber-300'
+            }`}>
+              {(() => {
+                const errInfo = errorMessages[createError];
+                if (errInfo) {
+                  return (
+                    <div>
+                      <p className="text-sm font-semibold text-red-800 flex items-center gap-1">
+                        <AlertTriangle className="w-4 h-4" />
+                        {errInfo.title}
+                      </p>
+                      <p className="text-xs text-red-700 mt-1">{errInfo.detail}</p>
+                    </div>
+                  );
+                }
+                return (
+                  <p className="text-sm text-amber-800 flex items-center gap-1">
+                    <AlertTriangle className="w-4 h-4" />
+                    {createError}
+                  </p>
+                );
+              })()}
             </div>
           )}
 
           <div className="flex gap-3 pt-2">
             <button
-              onClick={() => setShowCreatePlanModal(false)}
+              onClick={handleCloseModal}
               className="flex-1 px-4 py-2 border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors"
             >
               取消
